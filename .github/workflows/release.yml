@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ctx
+        env:
+          REF: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ steps.ctx.outputs.version }}
+        run: make dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ctx.outputs.tag }}
+        run: |
+          files=(dist/*)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --title "$TAG" --generate-notes
+          fi
+
+      - name: Scan the release binaries with VirusTotal
+        id: vt
+        if: env.VT_API_KEY != ''
+        uses: crazy-max/ghaction-virustotal@v5.0.0
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: dist/multidig_*
+          request_rate: 4
+          update_release_body: false
+
+      - name: Add the VirusTotal verdicts to the release
+        if: env.VT_API_KEY != '' && steps.vt.outputs.analysis != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ctx.outputs.tag }}
+          ANALYSIS: ${{ steps.vt.outputs.analysis }}
+        run: |
+          gh release view "$TAG" --json body -q .body \
+            | awk '/^### VirusTotal$/{exit} {print}' \
+            | perl -0pe 's/\n+\z/\n/' > body.md
+          {
+            echo ""
+            echo "### VirusTotal"
+            echo ""
+            tr ',' '\n' <<< "$ANALYSIS" | while IFS='=' read -r file url; do
+              [ -n "$url" ] || continue
+              echo "- [$(basename "$file")]($url)"
+            done
+          } >> body.md
+          gh release edit "$TAG" --notes-file body.md
