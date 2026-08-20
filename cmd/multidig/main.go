@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
 
+	"github.com/sratabix/multidig/internal/completion"
 	"github.com/sratabix/multidig/internal/dnsq"
 	"github.com/sratabix/multidig/internal/geo"
 	"github.com/sratabix/multidig/internal/health"
@@ -37,6 +39,7 @@ type options struct {
 	concurrency    int
 	expect         string
 	watch          time.Duration
+	autoRefresh    bool
 	explicit       string
 	addresses      bool
 	includeIPv6    bool
@@ -73,17 +76,18 @@ func run() error {
 	fs := flag.NewFlagSet("multidig", flag.ContinueOnError)
 	fs.Usage = usage(fs)
 
-	strVar(fs, &o.types, "A", "types", "t")
-	strVar(fs, &o.continents, strings.Join(geo.Default, ","), "continents", "c")
-	intVar(fs, &o.perContinent, 6, "per-continent", "n")
+	strVar(fs, &o.types, "A", "types", "t", "record types, comma separated")
+	strVar(fs, &o.continents, strings.Join(geo.Default, ","), "continents", "c", "continents to query, comma separated")
+	intVar(fs, &o.perContinent, 6, "per-continent", "n", "resolvers per continent")
 	fs.Float64Var(&o.minReliability, "min-reliability", 0.9, "minimum resolver reliability (0-1)")
 	fs.DurationVar(&o.maxAge, "max-age", 0, "ignore resolvers not checked within this period (0 disables; the source's checked_at is unreliable)")
 	fs.DurationVar(&o.timeout, "timeout", 3*time.Second, "per-query timeout")
 	fs.IntVar(&o.retries, "retries", 1, "retries per query")
 	fs.IntVar(&o.concurrency, "concurrency", 32, "concurrent queries")
 	fs.StringVar(&o.expect, "expect", "", "expected answer(s); propagation is measured against these")
-	durVar(fs, &o.watch, 0, "watch", "w")
-	strVar(fs, &o.explicit, "", "servers", "s")
+	durVar(fs, &o.watch, 0, "watch", "w", "auto-refresh interval, e.g. 10s")
+	boolVar(fs, &o.autoRefresh, false, "auto-refresh", "a", "auto-refresh on the default interval")
+	strVar(fs, &o.explicit, "", "servers", "s", "query these resolvers instead of the geo pool")
 	fs.BoolVar(&o.addresses, "addresses", false, "for CNAMEd names compare the resolved addresses instead of the CNAME target")
 	fs.BoolVar(&o.includeIPv6, "ipv6", false, "also use IPv6 resolvers")
 	fs.BoolVar(&o.requireCity, "require-city", false, "only use resolvers with a known city")
@@ -96,6 +100,10 @@ func run() error {
 	fs.IntVar(&o.probeConcurrency, "probe-concurrency", 96, "concurrent reachability probes")
 	fs.StringVar(&o.format, "format", "tui", "output format: tui, plain or json")
 	fs.BoolVar(&o.showVersion, "version", false, "print version and exit")
+
+	if len(os.Args) > 1 && os.Args[1] == completion.Command {
+		return completions(fs, os.Args[2:])
+	}
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -147,6 +155,7 @@ func run() error {
 		Concurrency: o.concurrency,
 		Expected:    parseExpect(o.expect),
 		WatchEvery:  o.watch,
+		AutoRefresh: o.autoRefresh || o.watch > 0,
 		SourceNote:  note,
 		Addresses:   o.addresses,
 	}
@@ -190,6 +199,43 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown format %q (want tui, plain or json)", o.format)
 	}
+}
+
+var completionTypes = []string{"A", "AAAA", "CAA", "CNAME", "DNSKEY", "DS", "MX", "NS", "PTR", "SOA", "SRV", "TXT"}
+
+func completions(fs *flag.FlagSet, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: multidig %s <%s>", completion.Command, strings.Join(completion.Shells, "|"))
+	}
+	script, err := completion.Script(args[0], "multidig", flagSpecs(fs))
+	if err != nil {
+		return err
+	}
+	fmt.Print(script)
+	return nil
+}
+
+func flagSpecs(fs *flag.FlagSet) []completion.Flag {
+	continents := append([]string(nil), geo.Order...)
+	sort.Strings(continents)
+
+	values := map[string][]string{
+		"types":      completionTypes,
+		"t":          completionTypes,
+		"continents": continents,
+		"c":          continents,
+		"format":     {"tui", "plain", "json"},
+	}
+
+	specs := []completion.Flag{{Name: "help", Usage: "show usage", Bool: true}}
+	fs.VisitAll(func(f *flag.Flag) {
+		spec := completion.Flag{Name: f.Name, Usage: f.Usage, Values: values[f.Name]}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			spec.Bool = true
+		}
+		specs = append(specs, spec)
+	})
+	return specs
 }
 
 func propagationStatus(expected []string, run output.Run) error {
@@ -324,19 +370,24 @@ func shortAge(d time.Duration) string {
 	}
 }
 
-func strVar(fs *flag.FlagSet, p *string, def string, name, alias string) {
-	fs.StringVar(p, name, def, "")
-	fs.StringVar(p, alias, def, "")
+func strVar(fs *flag.FlagSet, p *string, def string, name, alias, usage string) {
+	fs.StringVar(p, name, def, usage)
+	fs.StringVar(p, alias, def, usage)
 }
 
-func intVar(fs *flag.FlagSet, p *int, def int, name, alias string) {
-	fs.IntVar(p, name, def, "")
-	fs.IntVar(p, alias, def, "")
+func intVar(fs *flag.FlagSet, p *int, def int, name, alias, usage string) {
+	fs.IntVar(p, name, def, usage)
+	fs.IntVar(p, alias, def, usage)
 }
 
-func durVar(fs *flag.FlagSet, p *time.Duration, def time.Duration, name, alias string) {
-	fs.DurationVar(p, name, def, "")
-	fs.DurationVar(p, alias, def, "")
+func durVar(fs *flag.FlagSet, p *time.Duration, def time.Duration, name, alias, usage string) {
+	fs.DurationVar(p, name, def, usage)
+	fs.DurationVar(p, alias, def, usage)
+}
+
+func boolVar(fs *flag.FlagSet, p *bool, def bool, name, alias, usage string) {
+	fs.BoolVar(p, name, def, usage)
+	fs.BoolVar(p, alias, def, usage)
 }
 
 func usage(fs *flag.FlagSet) func() {
@@ -346,6 +397,7 @@ func usage(fs *flag.FlagSet) func() {
 
 usage:
   multidig [flags] <domain>
+  multidig completion bash|zsh|fish
 
 examples:
   multidig example.com
@@ -359,7 +411,8 @@ flags:
   -c, --continents       continents to query (default EU,NA,SA,AS,AF,OC)
   -n, --per-continent    resolvers per continent (default 6)
   -s, --servers          query these resolvers instead of the geo pool
-  -w, --watch            re-run on this interval, e.g. 10s
+  -a, --auto-refresh     auto-refresh on the default interval (10s)
+  -w, --watch            auto-refresh on this interval, e.g. 10s
       --expect           expected answer(s); propagation is measured against these
       --min-reliability  minimum resolver reliability, 0-1 (default 0.9)
       --oversample       candidates considered per wanted resolver (default 12)
@@ -380,9 +433,9 @@ flags:
       --version          print version
 
 keys in the tui:
-  ↑↓/jk move   enter detail   tab switch record type   / filter
-  a answer · r region · t latency · s resolver sort
-  R rerun   w toggle watch   q quit
+  ↑↓/jk move        enter detail        / filter
+  ←→/hl sort        tab record type     R rerun
+  w toggle auto-refresh                 q quit
 `)
 	}
 }

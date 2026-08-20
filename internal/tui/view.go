@@ -63,22 +63,43 @@ func (m *Model) rule(w int) string {
 }
 
 func (m *Model) renderTitle(s report.Summary, w int) string {
-	left := m.theme.Title.Render("multidig") + "  " + m.theme.Accent.Render(m.cfg.Domain)
+	kind := ""
 	if len(m.cfg.Types) == 1 {
-		left += m.theme.Subtle.Render("  " + m.cfg.Types[0] + " records")
+		kind = "  " + m.cfg.Types[0] + " records"
 	}
 
 	total := len(m.cfg.Servers)
 	status := fmt.Sprintf("%d/%d resolvers", s.Done, total)
-	if m.running {
+	switch {
+	case m.running:
 		status = fmt.Sprintf("querying %d/%d · %s", s.Done, total, fmtDuration(m.elapsed))
-	} else if s.Done > 0 {
+	case s.Done > 0:
 		status = fmt.Sprintf("%d/%d resolvers · %s", s.Done, total, fmtDuration(m.elapsed))
 	}
-	if m.watch && m.cfg.WatchEvery > 0 {
-		status += m.theme.Accent.Render(" · watch " + m.cfg.WatchEvery.String())
+
+	refresh := ""
+	if m.watch {
+		refresh = " · auto-refresh " + m.cfg.WatchEvery.String()
 	}
-	right := m.theme.Subtle.Render(status)
+
+	domain := m.cfg.Domain
+	width := func() int { return lipgloss.Width("multidig  " + domain + kind + status + refresh) }
+
+	if width() > w && kind != "" {
+		kind = ""
+	}
+	if width() > w && refresh != "" {
+		refresh = " · auto " + m.cfg.WatchEvery.String()
+	}
+	if width() > w {
+		refresh = ""
+	}
+	if over := width() - w; over > 0 {
+		domain = fit(domain, lipgloss.Width(domain)-over)
+	}
+
+	left := m.theme.Title.Render("multidig") + "  " + m.theme.Accent.Render(domain) + m.theme.Subtle.Render(kind)
+	right := m.theme.Subtle.Render(status) + m.theme.Accent.Render(refresh)
 
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -384,17 +405,15 @@ func (m *Model) renderFooter(w int) string {
 	hints = append(hints,
 		hint{"↑↓ move", 5},
 		hint{"enter detail", 4},
-		hint{"a/r/t/s sort:" + m.sort.String(), 2},
+		hint{"←→ sort:" + m.sort.String(), 2},
 		hint{"/ filter", 6},
 		hint{"R rerun", 1},
 	)
-	if m.cfg.WatchEvery > 0 {
-		state := "off"
-		if m.watch {
-			state = "on"
-		}
-		hints = append(hints, hint{"w watch:" + state, 7})
+	state := "off"
+	if m.watch {
+		state = "on " + m.cfg.WatchEvery.String()
 	}
+	hints = append(hints, hint{"w auto:" + state, 7})
 	hints = append(hints, hint{"q quit", 99})
 
 	for {

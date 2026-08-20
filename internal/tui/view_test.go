@@ -33,11 +33,12 @@ func fixture() *Model {
 	}
 
 	m := New(Config{
-		Domain:     "example.com",
-		Types:      []string{"A", "MX"},
-		Servers:    pool,
-		WatchEvery: 10 * time.Second,
-		SourceNote: "public-dns.info · 12 resolvers",
+		Domain:      "example.com",
+		Types:       []string{"A", "MX"},
+		Servers:     pool,
+		WatchEvery:  10 * time.Second,
+		AutoRefresh: true,
+		SourceNote:  "public-dns.info · 12 resolvers",
 	})
 	m.width, m.height = 110, 32
 
@@ -82,7 +83,7 @@ func TestRenderLayout(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"multidig", "example.com", "203.0.113.10", "REGION", "Amsterdam", "watch 10s"} {
+	for _, want := range []string{"multidig", "example.com", "203.0.113.10", "REGION", "Amsterdam", "auto-refresh 10s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render is missing %q", want)
 		}
