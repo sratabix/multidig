@@ -15,6 +15,8 @@ import (
 	"github.com/sratabix/multidig/internal/servers"
 )
 
+const DefaultRefresh = 10 * time.Second
+
 type Config struct {
 	Domain      string
 	Types       []string
@@ -24,6 +26,7 @@ type Config struct {
 	Concurrency int
 	Expected    []string
 	WatchEvery  time.Duration
+	AutoRefresh bool
 	SourceNote  string
 	Addresses   bool
 }
@@ -47,7 +50,12 @@ const (
 	sortRegion
 	sortLatency
 	sortResolver
+	sortModes
 )
+
+func (s sortMode) shift(delta int) sortMode {
+	return sortMode((int(s) + delta + int(sortModes)) % int(sortModes))
+}
 
 func (s sortMode) String() string {
 	switch s {
@@ -105,6 +113,9 @@ func New(cfg Config) *Model {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 24
 	}
+	if cfg.WatchEvery <= 0 {
+		cfg.WatchEvery = DefaultRefresh
+	}
 	ti := textinput.New()
 	ti.Prompt = "/"
 	ti.Placeholder = "region, city, resolver or answer"
@@ -116,7 +127,7 @@ func New(cfg Config) *Model {
 		results:   map[string][]dnsq.Result{},
 		summaries: map[string]report.Summary{},
 		filter:    ti,
-		watch:     cfg.WatchEvery > 0,
+		watch:     cfg.AutoRefresh,
 		width:     100,
 		height:    30,
 	}
@@ -144,7 +155,16 @@ func (m *Model) startRun() tea.Cmd {
 
 	m.stream = dnsq.Run(ctx, m.cfg.QueryOptions())
 
-	return tea.Batch(waitFor(m.runID, m.stream), tick())
+	cmds := []tea.Cmd{waitFor(m.runID, m.stream), tick()}
+	if m.watch {
+		cmds = append(cmds, m.scheduleRerun())
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) scheduleRerun() tea.Cmd {
+	id := m.runID
+	return tea.Tick(m.cfg.WatchEvery, func(time.Time) tea.Msg { return rerunMsg(id) })
 }
 
 func waitFor(runID int, ch <-chan dnsq.Result) tea.Cmd {
@@ -183,10 +203,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.open {
 			m.running = false
 			m.elapsed = time.Since(m.started)
-			if m.watch && m.cfg.WatchEvery > 0 {
-				id := m.runID
-				return m, tea.Tick(m.cfg.WatchEvery, func(time.Time) tea.Msg { return rerunMsg(id) })
-			}
 			return m, nil
 		}
 		typ := msg.res.Type
@@ -238,20 +254,22 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		return m, nil
 
-	case "tab", "right", "l":
-		if len(m.cfg.Types) > 1 {
-			m.activeType = (m.activeType + 1) % len(m.cfg.Types)
-			m.cursor, m.offset = 0, 0
-			m.recompute()
-		}
+	case "tab":
+		m.cycleType(1)
 		return m, nil
 
-	case "shift+tab", "left", "h":
-		if len(m.cfg.Types) > 1 {
-			m.activeType = (m.activeType - 1 + len(m.cfg.Types)) % len(m.cfg.Types)
-			m.cursor, m.offset = 0, 0
-			m.recompute()
-		}
+	case "shift+tab":
+		m.cycleType(-1)
+		return m, nil
+
+	case "right", "l":
+		m.sort = m.sort.shift(1)
+		m.recompute()
+		return m, nil
+
+	case "left", "h":
+		m.sort = m.sort.shift(-1)
+		m.recompute()
 		return m, nil
 
 	case "up", "k":
@@ -283,26 +301,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		return m, nil
 
-	case "a":
-		m.sort = sortAnswer
-		m.recompute()
-		return m, nil
-
-	case "r":
-		m.sort = sortRegion
-		m.recompute()
-		return m, nil
-
-	case "t":
-		m.sort = sortLatency
-		m.recompute()
-		return m, nil
-
-	case "s":
-		m.sort = sortResolver
-		m.recompute()
-		return m, nil
-
 	case "/":
 		m.filtering = true
 		return m, m.filter.Focus()
@@ -324,17 +322,30 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "w":
 		m.watch = !m.watch
-		if m.watch && !m.running && m.cfg.WatchEvery > 0 {
-			cmd := m.startRun()
-			return m, cmd
+		switch {
+		case !m.watch:
+			return m, nil
+		case m.running:
+			return m, m.scheduleRerun()
+		default:
+			return m, m.startRun()
 		}
-		return m, nil
 
 	case "R", "ctrl+r":
 		cmd := m.startRun()
 		return m, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) cycleType(delta int) {
+	if len(m.cfg.Types) < 2 {
+		return
+	}
+	n := len(m.cfg.Types)
+	m.activeType = (m.activeType + delta + n) % n
+	m.cursor, m.offset = 0, 0
+	m.recompute()
 }
 
 func (m *Model) activeTypeName() string {
