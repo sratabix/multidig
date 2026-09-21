@@ -43,6 +43,18 @@ func (c Config) QueryOptions() dnsq.Options {
 	}
 }
 
+func (c Config) runBudget() time.Duration {
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	retries := c.Retries
+	if retries < 0 {
+		retries = 0
+	}
+	return timeout * time.Duration(retries+1)
+}
+
 type sortMode int
 
 const (
@@ -76,7 +88,10 @@ type resultMsg struct {
 	open  bool
 }
 
-type tickMsg time.Time
+type tickMsg struct {
+	runID int
+	at    time.Time
+}
 type rerunMsg int
 
 type Model struct {
@@ -115,6 +130,9 @@ func New(cfg Config) *Model {
 	}
 	if cfg.WatchEvery <= 0 {
 		cfg.WatchEvery = DefaultRefresh
+	}
+	if floor := cfg.runBudget(); cfg.WatchEvery < floor {
+		cfg.WatchEvery = floor
 	}
 	ti := textinput.New()
 	ti.Prompt = "/"
@@ -155,7 +173,7 @@ func (m *Model) startRun() tea.Cmd {
 
 	m.stream = dnsq.Run(ctx, m.cfg.QueryOptions())
 
-	cmds := []tea.Cmd{waitFor(m.runID, m.stream), tick()}
+	cmds := []tea.Cmd{waitFor(m.runID, m.stream), tick(m.runID)}
 	if m.watch {
 		cmds = append(cmds, m.scheduleRerun())
 	}
@@ -174,8 +192,10 @@ func waitFor(runID int, ch <-chan dnsq.Result) tea.Cmd {
 	}
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+func tick(runID int) tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg{runID: runID, at: t}
+	})
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -190,11 +210,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		if m.running {
-			m.elapsed = time.Since(m.started)
-			return m, tick()
+		if msg.runID != m.runID || !m.running {
+			return m, nil
 		}
-		return m, nil
+		m.elapsed = time.Since(m.started)
+		return m, tick(m.runID)
 
 	case resultMsg:
 		if msg.runID != m.runID {
