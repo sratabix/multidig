@@ -43,18 +43,6 @@ func (c Config) QueryOptions() dnsq.Options {
 	}
 }
 
-func (c Config) runBudget() time.Duration {
-	timeout := c.Timeout
-	if timeout <= 0 {
-		timeout = 3 * time.Second
-	}
-	retries := c.Retries
-	if retries < 0 {
-		retries = 0
-	}
-	return timeout * time.Duration(retries+1)
-}
-
 type sortMode int
 
 const (
@@ -130,9 +118,6 @@ func New(cfg Config) *Model {
 	}
 	if cfg.WatchEvery <= 0 {
 		cfg.WatchEvery = DefaultRefresh
-	}
-	if floor := cfg.runBudget(); cfg.WatchEvery < floor {
-		cfg.WatchEvery = floor
 	}
 	ti := textinput.New()
 	ti.Prompt = "/"
